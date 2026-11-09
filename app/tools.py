@@ -27,6 +27,24 @@ def _names(entry: dict) -> list[str]:
         _normalize(a) for a in entry["aliases"]
     ]
 
+def make_quiz(lecture: int) -> str:
+    """指定した回の用語から1つを選び、確認問題と答えを返す
+    「第2回の確認問題を出して」のように、復習用の問題を求められたときに使う。
+    """
+    #1. load glossary() からlectureが一致する用語を集める
+    glossary = load_glossary()
+    terms = [e for e in glossary if e["lecture"] == lecture]
+    if not terms:
+        available = sorted(set(e["lecture"] for e in glossary))
+        return f"第{lecture}回の確認問題はまだありません。用意されている回: {', '.join(map(str, available))}"
+    #2. その中からランダムに1つ選ぶ
+    import random
+    term = random.choice(terms)
+    #3. 問題文と答えを文字列で返す
+    question = f"次の用語の定義は何でしょうか？\n\n{term['term']}\n\nヒント: {term['definition'][:30]}..."
+    answer = f"答え: {term['definition']}"
+    return f"{question}\n\n{answer}"    
+
 
 def search_glossary(query: str) -> str:
     """講座の用語集から用語を検索し、定義と、どの回で扱うかを返す。
