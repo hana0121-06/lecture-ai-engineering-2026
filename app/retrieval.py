@@ -125,7 +125,15 @@ def open_index(path: Path):
 
 
 def search(query: str) -> list[dict]:
-    """質問を埋め込み、近いページを最大RAG_TOP_K件返す。"""
+    """質問を埋め込み、近いページと同じ資料の前後1ページを返す。"""
+    # ベクトル検索のヒットを展開し、前後ページを文脈として返す。
+    hits = _search_hits(query)
+    return expand_search_hits(hits)
+
+
+def _search_hits(query: str) -> list[dict]:
+    """近似検索のヒットだけを返す。周辺ページの展開は行わない。"""
+    # グラフ検索でも再利用できるよう、周辺展開を含むsearch()から分離する。
     if not isinstance(query, str) or not query.strip():
         raise ValueError("検索語が空です。")
     with open_index(RAG_DB) as db:
@@ -136,6 +144,48 @@ def search(query: str) -> list[dict]:
             FROM chunks ORDER BY distance, page_id LIMIT ?
         """, (sqlite_vec.serialize_float32(vector), RAG_TOP_K))
         return [dict(row) for row in rows]
+
+
+def expand_search_hits(hits: list[dict], source: Path = RAG_SOURCE) -> list[dict]:
+    """各ヒットの資料内で前後1ページを、重複なく検索ヒット順に返す。"""
+    # 各資料ごとにページ位置を作り、ヒットを前後1ページの範囲へ展開する。
+    pages_by_document = defaultdict(list)
+    for page in load_pages(source):
+        pages_by_document[page["document_id"]].append(page)
+
+    page_positions = {}
+    for document_id, document_pages in pages_by_document.items():
+        page_positions.update(
+            (page["page_id"], (document_pages, index))
+            for index, page in enumerate(document_pages)
+        )
+
+    expanded = []
+    seen = set()
+    for hit in hits:
+        # 同じ資料内のヒットなら前後1ページを候補に含める。
+        positioned = page_positions.get(hit["page_id"])
+        if positioned is None:
+            candidate_pages = [hit]
+        else:
+            document_pages, index = positioned
+            candidate_pages = [
+                document_pages[position]
+                for position in range(max(0, index - 1), min(len(document_pages), index + 2))
+            ]
+
+        hit_position = hit["page_id"]
+        for candidate in candidate_pages:
+            page_id = candidate["page_id"]
+            # 複数ヒットからの重複ページは一度だけ追加する。
+            if page_id in seen:
+                continue
+            seen.add(page_id)
+            if page_id == hit_position:
+                expanded.append({**candidate, "distance": hit["distance"]})
+            else:
+                expanded.append(dict(candidate))
+    return expanded
 
 
 def search_graph(query: str) -> dict:
@@ -151,7 +201,8 @@ def search_graph(query: str) -> dict:
             adjacent[a].add(b)
             adjacent[b].add(a)
 
-    seeds = [hit for hit in search(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
+    # グラフ探索では周辺展開前のヒットをシードとして使う。
+    seeds = [hit for hit in _search_hits(query) if hit["page_id"] in pages][:min(GRAPH_START_K, GRAPH_MAX_RESULTS)]
     seed_ids = {seed["page_id"] for seed in seeds}
     results, candidates = [], {}
     for rank, seed in enumerate(seeds):
